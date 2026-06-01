@@ -100,8 +100,14 @@ def master(req: MasterReq, x_master_token: str = Header(default="")):
         try:
             _download(req.targetUrl, t_in)
             _download(req.referenceUrl, r_in)
+            # Convert to 44.1k stereo WAV. Matchering loads whole songs as float arrays, which can
+            # OOM a small instance — so keep the reference SHORT (the first ~60s is plenty to learn
+            # its loudness/tone) to cut peak memory. The full target is still mastered.
             _to_wav(t_in, t_wav)
-            _to_wav(r_in, r_wav)
+            subprocess.run(
+                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "60", "-i", r_in, r_wav],
+                check=True, timeout=90,
+            )
             # The heart of it: match the target to the reference (RMS, frequency response,
             # peak, stereo width). 16-bit PCM result, then encode to MP3.
             mg.process(target=t_wav, reference=r_wav, results=[mg.pcm16(out_wav)])
