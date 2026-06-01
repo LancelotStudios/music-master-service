@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+matchering==2.0.6
+numpy<2
+static-ffmpeg==2.7

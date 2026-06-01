@@ -1,0 +1,14 @@
+# Render deploy for the reference-match mastering service.
+# Native Python runtime (NO apt) — ffmpeg ships via the imageio-ffmpeg pip package. Binds $PORT.
+services:
+  - type: web
+    name: music-master-service
+    runtime: python
+    plan: starter            # mastering uses real CPU/RAM; the free plan may OOM/sleep
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: MASTER_TOKEN    # shared secret; set the value in the Render dashboard (sync:false)
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.9"
