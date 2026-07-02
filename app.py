@@ -208,17 +208,32 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
     # Cap the clip at 8 minutes — matches Suno's cover-input limit and keeps files small.
     length = min((end - start) if end > start else 480.0, 480.0)
 
+    # Capture yt-dlp's own debug log so a failure tells us WHY (is the POT plugin loading? which
+    # client ran? was a token fetched?) instead of just "bot wall".
+    log_lines: list[str] = []
+
+    class _Log:
+        def debug(self, msg):  # noqa: ANN001
+            log_lines.append(str(msg))
+        def info(self, msg):  # noqa: ANN001
+            log_lines.append(str(msg))
+        def warning(self, msg):  # noqa: ANN001
+            log_lines.append(f"W: {msg}")
+        def error(self, msg):  # noqa: ANN001
+            log_lines.append(f"E: {msg}")
+
     with tempfile.TemporaryDirectory() as d:
         opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(d, "yt.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
             "noplaylist": True,
             "retries": 2,
             "socket_timeout": 30,
-            # No player_client override: with the PO-token provider running, yt-dlp's default
-            # clients pass YouTube's datacenter bot-wall (the bgutil plugin auto-detects :4416).
+            "verbose": True,
+            "logger": _Log(),
+            # Force the web player: it's the client the PO-token flow supports (the default tv
+            # client ignores tokens entirely and just hits the bot wall).
+            "extractor_args": {"youtube": {"player_client": ["web"]}},
         }
         # Optional escape hatch: a logged-in session's cookies (base64 of a Netscape cookies.txt in
         # the YTDLP_COOKIES_B64 env var) — the reliable fix if the client trick stops working.
@@ -237,7 +252,10 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
                 info = ydl.extract_info(req.url, download=True)
                 src = ydl.prepare_filename(info)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(e)[:200]}")
+            # Surface the load-bearing debug lines (plugin/POT/client) so failures are diagnosable.
+            keys = ("pot", "POT", "bgutil", "plugin", "player", "client")
+            interesting = [l for l in log_lines if any(k in l for k in keys)][-8:]
+            raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(e)[:160]} || LOG: {' | '.join(interesting)[:600]}")
         mp3 = os.path.join(d, "audio.mp3")
         args = [_ffmpeg(), "-y", "-loglevel", "error"]
         if start > 0:
