@@ -13,6 +13,7 @@
 import os
 import tempfile
 import subprocess
+import threading
 import urllib.request
 
 from fastapi import FastAPI, HTTPException, Header
@@ -56,6 +57,11 @@ def _ffmpeg() -> str:
 
 # Optional shared secret so only our app can call it (set in Render + Vercel).
 MASTER_TOKEN = os.environ.get("MASTER_TOKEN", "").strip()
+
+# Heavy audio work (analysis, mastering) must run ONE AT A TIME — two concurrent jobs double the
+# memory and OOM the 512MB instance (verified live). FastAPI runs sync handlers in a threadpool,
+# so concurrent requests otherwise really do overlap; this lock makes them queue instead.
+HEAVY_LOCK = threading.Lock()
 MAX_BYTES = 60 * 1024 * 1024  # 60 MB cap per download (a song is a few MB)
 
 
@@ -119,12 +125,12 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
     if not _ANALYZE_OK:
         raise HTTPException(status_code=503, detail=f"Analysis unavailable: {_ANALYZE_ERR}")
 
-    with tempfile.TemporaryDirectory() as d:
+    with HEAVY_LOCK, tempfile.TemporaryDirectory() as d:
         a_in = os.path.join(d, "audio_in")
         a_wav = os.path.join(d, "audio.wav")
         try:
             _download(req.audioUrl, a_in)
-            # Decode to a 44.1k WAV, capped at the first 2.5 minutes (captures the sound,
+            # Decode to a 44.1k WAV, capped at the first 2 minutes (captures the sound,
             # fits the 512MB instance). librosa/soundfile read the WAV from here.
             subprocess.run(
                 [_ffmpeg(), "-y", "-loglevel", "error", "-t", "120", "-i", a_in, "-ar", "44100", a_wav],
@@ -230,8 +236,8 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             "format": "bestaudio/best",
             "outtmpl": os.path.join(d, "yt.%(ext)s"),
             "noplaylist": True,
-            "retries": 2,
-            "socket_timeout": 30,
+            "retries": 1,
+            "socket_timeout": 20,
             "verbose": True,
             "logger": _Log(),
             # Verified recipe (2026-07-02): residential proxy + the ANDROID player client — its
@@ -256,7 +262,7 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
         # aren't — so a failed try is a lottery loss, not a verdict. Retry on fresh addresses.
         src = None
         last_err: Exception | None = None
-        for _attempt in range(4):
+        for _attempt in range(3):
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(req.url, download=True)
@@ -290,7 +296,7 @@ def master(req: MasterReq, x_master_token: str = Header(default="")):
     if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
         raise HTTPException(status_code=401, detail="Bad or missing token.")
 
-    with tempfile.TemporaryDirectory() as d:
+    with HEAVY_LOCK, tempfile.TemporaryDirectory() as d:
         t_in = os.path.join(d, "target_in")
         r_in = os.path.join(d, "ref_in")
         t_wav = os.path.join(d, "target.wav")
