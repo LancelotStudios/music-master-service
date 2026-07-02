@@ -104,6 +104,8 @@ def health():
         "analyze": _ANALYZE_OK or _ANALYZE_ERR,
         # Which build is serving (Render sets RENDER_GIT_COMMIT) — for deploy debugging.
         "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
+        # Is the PO-token provider (YouTube bot-wall pass) up?
+        "pot": _pot_alive(),
     }
 
 
@@ -139,6 +141,50 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
     return result
 
 
+# ---- PO-token provider (dodges YouTube's datacenter bot-wall without accounts/cookies) ----
+# We launch the single-binary Rust provider (protocol-compatible with the bgutil yt-dlp plugin,
+# which auto-detects it at 127.0.0.1:4416). Best-effort: any failure here only means /fetch-youtube
+# behaves as before (bot-walled) — it can never affect /master or /analyze.
+POT_BIN_URL = os.environ.get(
+    "BGUTIL_POT_URL",
+    "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64",
+)
+_POT_STARTED = False
+
+
+def _ensure_pot_provider() -> None:
+    global _POT_STARTED
+    if _POT_STARTED or os.environ.get("DISABLE_POT_PROVIDER"):
+        return
+    _POT_STARTED = True
+    try:
+        binp = "/tmp/bgutil-pot"
+        if not os.path.exists(binp):
+            _download(POT_BIN_URL, binp)
+            os.chmod(binp, 0o755)
+        subprocess.Popen(
+            [binp, "server", "--host", "127.0.0.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # provider is a bonus, never a dependency
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    _ensure_pot_provider()
+
+
+def _pot_alive() -> bool:
+    try:
+        req = urllib.request.Request("http://127.0.0.1:4416/ping")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 class FetchYouTubeReq(BaseModel):
     url: str
     startSeconds: float | None = None
@@ -171,9 +217,8 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             "noplaylist": True,
             "retries": 2,
             "socket_timeout": 30,
-            # Datacenter IPs hit YouTube's "confirm you're not a bot" wall on the default web
-            # client; the tv/android/embedded clients usually don't. Try them in order.
-            "extractor_args": {"youtube": {"player_client": ["tv", "android", "web_embedded"]}},
+            # No player_client override: with the PO-token provider running, yt-dlp's default
+            # clients pass YouTube's datacenter bot-wall (the bgutil plugin auto-detects :4416).
         }
         # Optional escape hatch: a logged-in session's cookies (base64 of a Netscape cookies.txt in
         # the YTDLP_COOKIES_B64 env var) — the reliable fix if the client trick stops working.

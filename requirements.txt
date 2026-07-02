@@ -10,3 +10,5 @@ pyloudnorm==0.2.0
 soundfile
 # YouTube audio extraction (/fetch-youtube): lets the app treat a pasted link like an upload.
 yt-dlp
+# PO-token plugin for yt-dlp (pairs with the bgutil-pot provider binary launched at startup).
+bgutil-ytdlp-pot-provider
