@@ -102,6 +102,8 @@ def health():
         "service": "reference-match mastering + analysis",
         "matchering": getattr(mg, "__version__", "2"),
         "analyze": _ANALYZE_OK or _ANALYZE_ERR,
+        # Which build is serving (Render sets RENDER_GIT_COMMIT) — for deploy debugging.
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
     }
 
 

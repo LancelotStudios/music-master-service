@@ -296,10 +296,21 @@ def analyze_wav(wav_path: str) -> dict[str, Any]:
     mono_full = data.mean(axis=1, dtype=np.float32)
     duration = len(mono_full) / float(sr)
 
-    # Loudness needs the full-channel data — do it FIRST, then free the big stereo array
-    # so its memory isn't held while the spectrogram work allocates.
-    loudness = _analyze_loudness(data, sr, mono_full)
+    # Loudness on a 24 kHz stereo downsample — pyloudnorm's filters copy the array in float64,
+    # which OOM'd the 512MB instance at 44.1k. LUFS reads the same at 24 kHz (K-weighted loudness
+    # gets almost nothing from content above 12 kHz). Free the big buffers as soon as possible.
+    LOUD_SR = 24000
+    if sr != LOUD_SR:
+        loud_data = np.ascontiguousarray(
+            librosa.resample(np.ascontiguousarray(data.T), orig_sr=sr, target_sr=LOUD_SR).T,
+            dtype=np.float32,
+        )
+    else:
+        loud_data = data
     del data
+    loud_mono = loud_data.mean(axis=1, dtype=np.float32)
+    loudness = _analyze_loudness(loud_data, LOUD_SR, loud_mono)
+    del loud_data, loud_mono
 
     spectral = _analyze_spectral(mono_full, sr)
 
