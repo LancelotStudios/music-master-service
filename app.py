@@ -62,6 +62,18 @@ MASTER_TOKEN = os.environ.get("MASTER_TOKEN", "").strip()
 # memory and OOM the 512MB instance (verified live). FastAPI runs sync handlers in a threadpool,
 # so concurrent requests otherwise really do overlap; this lock makes them queue instead.
 HEAVY_LOCK = threading.Lock()
+
+
+def _release_memory() -> None:
+    """After a heavy job: force-collect and hand freed pages back to the OS (glibc hoards them
+    otherwise), so back-to-back jobs don't stack RSS and OOM the small instance."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass  # non-glibc (e.g. local mac) — fine
 MAX_BYTES = 60 * 1024 * 1024  # 60 MB cap per download (a song is a few MB)
 
 
@@ -143,6 +155,8 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
             raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Analysis failed: {e}")
+        finally:
+            _release_memory()
 
     return result
 
