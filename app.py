@@ -125,7 +125,7 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
             # Decode to a 44.1k WAV, capped at the first 2.5 minutes (captures the sound,
             # fits the 512MB instance). librosa/soundfile read the WAV from here.
             subprocess.run(
-                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "150", "-i", a_in, "-ar", "44100", a_wav],
+                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "120", "-i", a_in, "-ar", "44100", a_wav],
                 check=True, timeout=120,
             )
             result = analyze_wav(a_wav)

@@ -59,7 +59,7 @@ _BANDS = [
     ("air", 6000, 20000),
 ]
 
-MAX_SECONDS = 150  # analyze the first 2.5 minutes — captures a song's sound, fits a 512MB instance
+MAX_SECONDS = 120  # analyze the first 2 minutes — captures a song's sound, fits a 512MB instance
 MIR_SR = 22050     # standard sample rate for tempo/key work (fast, accurate enough)
 
 
@@ -161,19 +161,22 @@ def _profile_key(pcp: np.ndarray, maj: np.ndarray, minr: np.ndarray) -> list[tup
 
 
 def _analyze_key(y: np.ndarray, sr: int) -> dict[str, Any]:
-    def _pcp(sig: np.ndarray) -> np.ndarray:
-        chroma = librosa.feature.chroma_cqt(y=sig, sr=sr)
-        return chroma.mean(axis=1)  # average pitch-class energy over the whole track
+    # STFT chroma on a 60s middle slice. The earlier version ran harmonic-percussive
+    # separation + CQT chroma over the whole window — better in theory, but each allocates
+    # multiple full-spectrogram copies and OOM'd the 512MB instance. STFT chroma with the
+    # two-profile agreement check still reads keys reliably, in a fraction of the memory.
+    if len(y) > 60 * sr:
+        mid = len(y) // 2
+        y = y[max(0, mid - 30 * sr): mid + 30 * sr]
 
-    # Harmonic-percussive separation first: stripping the drums cleans the chroma and
-    # measurably helps template-based key detection. Fall back to the raw signal if the
-    # harmonic mask comes back empty (can happen on sparse/synthetic material).
+    def _pcp(sig: np.ndarray) -> np.ndarray:
+        chroma = librosa.feature.chroma_stft(y=sig, sr=sr)
+        return chroma.mean(axis=1)  # average pitch-class energy over the slice
+
     try:
-        pcp = _pcp(librosa.effects.harmonic(y))
-        if pcp.sum() <= 1e-6:
-            pcp = _pcp(y)
-    except Exception:
         pcp = _pcp(y)
+    except Exception:
+        return {"key": "", "confidence": 0.0, "alternatives": []}
     if pcp.sum() <= 1e-6:
         return {"key": "", "confidence": 0.0, "alternatives": []}
 
@@ -312,7 +315,7 @@ def analyze_wav(wav_path: str) -> dict[str, Any]:
     loudness = _analyze_loudness(loud_data, LOUD_SR, loud_mono)
     del loud_data, loud_mono
 
-    spectral = _analyze_spectral(mono_full, sr)
+    spectral = _analyze_spectral(mono_full[: min(len(mono_full), 90 * sr)], sr)
 
     # Lower-rate mono for the MIR work (tempo/key/energy); free the 44.1k mono after.
     y = librosa.resample(mono_full, orig_sr=sr, target_sr=MIR_SR) if sr != MIR_SR else mono_full
