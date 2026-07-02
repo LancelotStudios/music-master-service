@@ -171,7 +171,22 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             "noplaylist": True,
             "retries": 2,
             "socket_timeout": 30,
+            # Datacenter IPs hit YouTube's "confirm you're not a bot" wall on the default web
+            # client; the tv/android/embedded clients usually don't. Try them in order.
+            "extractor_args": {"youtube": {"player_client": ["tv", "android", "web_embedded"]}},
         }
+        # Optional escape hatch: a logged-in session's cookies (base64 of a Netscape cookies.txt in
+        # the YTDLP_COOKIES_B64 env var) — the reliable fix if the client trick stops working.
+        ck = os.environ.get("YTDLP_COOKIES_B64", "").strip()
+        if ck:
+            try:
+                import base64
+                cookie_path = os.path.join(d, "cookies.txt")
+                with open(cookie_path, "wb") as f:
+                    f.write(base64.b64decode(ck))
+                opts["cookiefile"] = cookie_path
+            except Exception:
+                pass  # bad env value → just proceed without cookies
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(req.url, download=True)
