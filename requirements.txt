@@ -3,3 +3,8 @@ uvicorn[standard]==0.34.0
 matchering==2.0.6
 numpy<2
 static-ffmpeg==2.7
+# DSP analysis (/analyze): measure tempo/key/loudness so the app grounds the LLM instead
+# of letting it guess. All BSD/MIT/ISC — clean for commercial use, CPU-only, pip wheels.
+librosa==0.11.0
+pyloudnorm==0.2.0
+soundfile

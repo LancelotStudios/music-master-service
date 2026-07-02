@@ -35,3 +35,25 @@ built-in polish/master — nothing breaks.
 Local end-to-end with the exact deploy code (static-ffmpeg, no system ffmpeg): `/master` returned
 a valid 2.2 MB MP3; output matched the reference's tone (target highs −32 dB → −30, toward the
 reference's −30.7) and loudness; token gate returns 401 without the header.
+
+## `/analyze` — DSP song analysis (added 2026-06-07)
+`POST /analyze { audioUrl }` (same `X-Master-Token` header) → measures the song's OBJECTIVE
+sound with real signal processing and returns JSON: tempo (BPM + confidence + half/double-time
+candidates), key + mode (+ confidence + harmonically-adjacent alternatives), loudness
+(LUFS/LRA), dynamics (crest factor), tonal balance (sub→air band %, centroid, descriptors),
+and the energy/arrangement arc. This exists because an LLM hallucinates these numbers (it
+confuses half/double-time tempo, mis-calls the key); DSP measures them so the app can GROUND
+its AI description instead of guessing. Code: `analyze.py` (librosa + pyloudnorm + ffmpeg — all
+BSD/MIT/ISC, CPU-only, pip wheels). Imported defensively, so an analysis-dep problem can never
+take down `/master`.
+
+The Next.js app calls it when `ANALYZE_SERVICE_URL` (the Render URL) + `MASTER_TOKEN` are set in
+Vercel. If `ANALYZE_SERVICE_URL` is unset, the app silently falls back to the pure-Gemini path —
+nothing breaks until it's live.
+
+Verified locally (2026-06-07) against synthetic audio with known ground truth: key detection
+exact on C-major and A-minor progressions (with relative/parallel/fifth alternatives); tempo
+exact on 4/5 test grooves (120/90/100/140 BPM) and the 5th (75 BPM) correctly *flagged
+low-confidence* as a genuine 75-vs-152 half/double ambiguity rather than asserting a wrong
+number; spectral/loudness sane. Tempo octave resolution is the known weak spot — the accuracy
+upgrade is Essentia RhythmExtractor2013 or a madmom/allin1 downbeat tracker (see the research note).

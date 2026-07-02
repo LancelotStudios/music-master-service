@@ -20,7 +20,18 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 import matchering as mg
 
-app = FastAPI(title="Reference-match mastering")
+# DSP analysis (tempo/key/loudness/etc). Imported defensively so a problem loading the
+# heavier analysis deps (librosa/numba) can never take down the mastering endpoint.
+try:
+    from analyze import analyze_wav
+    _ANALYZE_OK = True
+    _ANALYZE_ERR = ""
+except Exception as _ae:  # pragma: no cover - import guard
+    analyze_wav = None  # type: ignore
+    _ANALYZE_OK = False
+    _ANALYZE_ERR = str(_ae)
+
+app = FastAPI(title="Reference-match mastering + analysis")
 
 
 _FFMPEG_CACHE = ""
@@ -53,6 +64,10 @@ class MasterReq(BaseModel):
     referenceUrl: str
 
 
+class AnalyzeReq(BaseModel):
+    audioUrl: str
+
+
 def _download(url: str, path: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "master-service/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -82,7 +97,44 @@ def _to_mp3(src: str, dst: str) -> None:
 
 @app.get("/")
 def health():
-    return {"ok": True, "service": "reference-match mastering", "matchering": getattr(mg, "__version__", "2")}
+    return {
+        "ok": True,
+        "service": "reference-match mastering + analysis",
+        "matchering": getattr(mg, "__version__", "2"),
+        "analyze": _ANALYZE_OK or _ANALYZE_ERR,
+    }
+
+
+@app.post("/analyze")
+def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
+    """Measure a song's objective sound with DSP (tempo/key/loudness/dynamics/tonal balance/
+    energy arc) so the app can GROUND its description instead of letting an LLM guess. Returns
+    JSON. Same shared-secret auth as /master."""
+    if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
+        raise HTTPException(status_code=401, detail="Bad or missing token.")
+    if not _ANALYZE_OK:
+        raise HTTPException(status_code=503, detail=f"Analysis unavailable: {_ANALYZE_ERR}")
+
+    with tempfile.TemporaryDirectory() as d:
+        a_in = os.path.join(d, "audio_in")
+        a_wav = os.path.join(d, "audio.wav")
+        try:
+            _download(req.audioUrl, a_in)
+            # Decode to a 44.1k WAV, capped at the first 4 minutes (plenty to capture the sound,
+            # bounds memory). librosa/soundfile read the WAV from here.
+            subprocess.run(
+                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "240", "-i", a_in, "-ar", "44100", a_wav],
+                check=True, timeout=120,
+            )
+            result = analyze_wav(a_wav)
+        except subprocess.CalledProcessError:
+            raise HTTPException(status_code=502, detail="Audio conversion failed.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Analysis failed: {e}")
+
+    return result
 
 
 @app.post("/master")
