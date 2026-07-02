@@ -120,10 +120,10 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
         a_wav = os.path.join(d, "audio.wav")
         try:
             _download(req.audioUrl, a_in)
-            # Decode to a 44.1k WAV, capped at the first 4 minutes (plenty to capture the sound,
-            # bounds memory). librosa/soundfile read the WAV from here.
+            # Decode to a 44.1k WAV, capped at the first 2.5 minutes (captures the sound,
+            # fits the 512MB instance). librosa/soundfile read the WAV from here.
             subprocess.run(
-                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "240", "-i", a_in, "-ar", "44100", a_wav],
+                [_ffmpeg(), "-y", "-loglevel", "error", "-t", "150", "-i", a_in, "-ar", "44100", a_wav],
                 check=True, timeout=120,
             )
             result = analyze_wav(a_wav)

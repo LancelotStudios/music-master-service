@@ -59,7 +59,7 @@ _BANDS = [
     ("air", 6000, 20000),
 ]
 
-MAX_SECONDS = 240  # analyze up to the first 4 minutes — plenty to capture the sound, bounds RAM/CPU
+MAX_SECONDS = 150  # analyze the first 2.5 minutes — captures a song's sound, fits a 512MB instance
 MIR_SR = 22050     # standard sample rate for tempo/key work (fast, accurate enough)
 
 
@@ -288,23 +288,32 @@ def analyze_wav(wav_path: str) -> dict[str, Any]:
     if not _LIBROSA_OK:
         raise RuntimeError(f"librosa unavailable: {_LIBROSA_ERR}")
 
-    # Full-resolution read for loudness/dynamics/spectral (keeps real sr + channels).
-    data, sr = sf.read(wav_path, always_2d=True)
+    # float32 throughout — float64 doubled every array (and forced complex128 spectrograms),
+    # which OOM'd the 512MB Render instance. float32 is plenty for these measurements.
+    data, sr = sf.read(wav_path, always_2d=True, dtype="float32")
     if data.shape[0] > sr * MAX_SECONDS:
         data = data[: sr * MAX_SECONDS]
-    mono_full = data.mean(axis=1)
-
-    # Lower-rate mono for the MIR work (tempo/key/energy).
-    y = librosa.resample(mono_full.astype(np.float32), orig_sr=sr, target_sr=MIR_SR) if sr != MIR_SR else mono_full.astype(np.float32)
-
+    mono_full = data.mean(axis=1, dtype=np.float32)
     duration = len(mono_full) / float(sr)
+
+    # Loudness needs the full-channel data — do it FIRST, then free the big stereo array
+    # so its memory isn't held while the spectrogram work allocates.
+    loudness = _analyze_loudness(data, sr, mono_full)
+    del data
+
+    spectral = _analyze_spectral(mono_full, sr)
+
+    # Lower-rate mono for the MIR work (tempo/key/energy); free the 44.1k mono after.
+    y = librosa.resample(mono_full, orig_sr=sr, target_sr=MIR_SR) if sr != MIR_SR else mono_full
+    if y is not mono_full:
+        del mono_full
 
     result: dict[str, Any] = {
         "duration_sec": _r(duration, 1),
         "tempo": _analyze_tempo(y, MIR_SR),
         "key": _analyze_key(y, MIR_SR),
-        "loudness": _analyze_loudness(data, sr, mono_full),
-        "spectral": _analyze_spectral(mono_full, sr),
+        "loudness": loudness,
+        "spectral": spectral,
         "energy_arc": _analyze_energy_arc(y, MIR_SR),
         "meta": {
             "analyzer": "dsp-v1",
