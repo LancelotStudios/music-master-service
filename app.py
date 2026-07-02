@@ -189,6 +189,9 @@ class FetchYouTubeReq(BaseModel):
     url: str
     startSeconds: float | None = None
     endSeconds: float | None = None
+    # Residential proxy (e.g. Webshare) — passes YouTube's datacenter bot-wall. Sent by the app
+    # (token-authed HTTPS) so the secret lives in one place (Vercel env), no Render config needed.
+    proxyUrl: str | None = None
 
 
 @app.post("/fetch-youtube")
@@ -231,10 +234,12 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             "socket_timeout": 30,
             "verbose": True,
             "logger": _Log(),
-            # Force the web player: it's the client the PO-token flow supports (the default tv
-            # client ignores tokens entirely and just hits the bot wall).
-            "extractor_args": {"youtube": {"player_client": ["web"]}},
+            # Verified recipe (2026-07-02): residential proxy + the ANDROID player client — its
+            # media formats download without PO tokens (web needs tokens; tv errors out).
+            "extractor_args": {"youtube": {"player_client": ["android"]}},
         }
+        if req.proxyUrl and req.proxyUrl.strip():
+            opts["proxy"] = req.proxyUrl.strip()
         # Optional escape hatch: a logged-in session's cookies (base64 of a Netscape cookies.txt in
         # the YTDLP_COOKIES_B64 env var) — the reliable fix if the client trick stops working.
         ck = os.environ.get("YTDLP_COOKIES_B64", "").strip()
