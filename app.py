@@ -258,6 +258,17 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             # media formats download without PO tokens (web needs tokens; tv errors out).
             "extractor_args": {"youtube": {"player_client": ["android"]}},
         }
+        # Download ONLY the requested window — a long video's full audio through a residential
+        # proxy is too slow (verified: 40-min symphony timed out). Ranged download cuts the
+        # transfer to just the slice we need; ffmpeg below still trims precisely.
+        ranged = False
+        try:
+            from yt_dlp.utils import download_range_func
+            opts["download_ranges"] = download_range_func(None, [(start, start + length)])
+            opts["force_keyframes_at_cuts"] = False
+            ranged = True
+        except Exception:
+            pass  # older yt-dlp — falls back to full download
         if req.proxyUrl and req.proxyUrl.strip():
             opts["proxy"] = req.proxyUrl.strip()
         # Optional escape hatch: a logged-in session's cookies (base64 of a Netscape cookies.txt in
@@ -291,7 +302,9 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(last_err)[:160]} || LOG: {' | '.join(interesting)[:600]}")
         mp3 = os.path.join(d, "audio.mp3")
         args = [_ffmpeg(), "-y", "-loglevel", "error"]
-        if start > 0:
+        # A ranged download already STARTS at the requested time — skipping again would cut
+        # into the music. Only seek when we had to download the whole file.
+        if start > 0 and not ranged:
             args += ["-ss", str(start)]
         args += ["-i", src, "-t", str(length), "-c:a", "libmp3lame", "-q:a", "2", mp3]
         try:
