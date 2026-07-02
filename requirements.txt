@@ -8,3 +8,5 @@ static-ffmpeg==2.7
 librosa==0.11.0
 pyloudnorm==0.2.0
 soundfile
+# YouTube audio extraction (/fetch-youtube): lets the app treat a pasted link like an upload.
+yt-dlp

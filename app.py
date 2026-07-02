@@ -139,6 +139,61 @@ def analyze(req: AnalyzeReq, x_master_token: str = Header(default="")):
     return result
 
 
+class FetchYouTubeReq(BaseModel):
+    url: str
+    startSeconds: float | None = None
+    endSeconds: float | None = None
+
+
+@app.post("/fetch-youtube")
+def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")):
+    """Pull the AUDIO from a YouTube link as an mp3 (optionally trimmed to a start/stop window),
+    so the app can treat a pasted link exactly like an uploaded file (measured analysis + Suno
+    covers). Beta-mode convenience; the ToS/legal review lives on the app's future-ideas list."""
+    if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
+        raise HTTPException(status_code=401, detail="Bad or missing token.")
+    try:
+        import yt_dlp  # lazy import so a broken dep can never take down /master or /analyze
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"yt-dlp unavailable: {e}")
+
+    start = max(0.0, float(req.startSeconds or 0.0))
+    end = float(req.endSeconds or 0.0)
+    # Cap the clip at 8 minutes — matches Suno's cover-input limit and keeps files small.
+    length = min((end - start) if end > start else 480.0, 480.0)
+
+    with tempfile.TemporaryDirectory() as d:
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(d, "yt.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "retries": 2,
+            "socket_timeout": 30,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(req.url, download=True)
+                src = ydl.prepare_filename(info)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(e)[:200]}")
+        mp3 = os.path.join(d, "audio.mp3")
+        args = [_ffmpeg(), "-y", "-loglevel", "error"]
+        if start > 0:
+            args += ["-ss", str(start)]
+        args += ["-i", src, "-t", str(length), "-c:a", "libmp3lame", "-q:a", "2", mp3]
+        try:
+            subprocess.run(args, check=True, timeout=180)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Audio conversion failed.")
+        with open(mp3, "rb") as f:
+            data = f.read()
+    if len(data) < 1000:
+        raise HTTPException(status_code=502, detail="Extracted audio looks empty.")
+    return Response(content=data, media_type="audio/mpeg")
+
+
 @app.post("/master")
 def master(req: MasterReq, x_master_token: str = Header(default="")):
     if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
