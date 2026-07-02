@@ -252,15 +252,23 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
                 opts["cookiefile"] = cookie_path
             except Exception:
                 pass  # bad env value → just proceed without cookies
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(req.url, download=True)
-                src = ydl.prepare_filename(info)
-        except Exception as e:
+        # A rotating proxy exits from a DIFFERENT address each attempt — some are flagged, most
+        # aren't — so a failed try is a lottery loss, not a verdict. Retry on fresh addresses.
+        src = None
+        last_err: Exception | None = None
+        for _attempt in range(4):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(req.url, download=True)
+                    src = ydl.prepare_filename(info)
+                break
+            except Exception as e:
+                last_err = e
+        if src is None:
             # Surface the load-bearing debug lines (plugin/POT/client) so failures are diagnosable.
             keys = ("pot", "POT", "bgutil", "plugin", "player", "client")
             interesting = [l for l in log_lines if any(k in l for k in keys)][-8:]
-            raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(e)[:160]} || LOG: {' | '.join(interesting)[:600]}")
+            raise HTTPException(status_code=502, detail=f"Couldn't fetch that video's audio: {str(last_err)[:160]} || LOG: {' | '.join(interesting)[:600]}")
         mp3 = os.path.join(d, "audio.mp3")
         args = [_ffmpeg(), "-y", "-loglevel", "error"]
         if start > 0:
