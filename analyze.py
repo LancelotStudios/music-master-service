@@ -83,98 +83,102 @@ def _perceptual_weight(bpm: float) -> float:
 
 
 def _analyze_tempo(y: np.ndarray, sr: int) -> dict[str, Any]:
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    # FELT tempo — the speed a person taps a foot to, not the strongest mathematical
+    # repetition. Bench-tuned 2026-07-03 against ground-truth files after two failure
+    # classes hit live: (a) the 3:4 / 4:3 metrical trap (a real ~75 BPM chill groove read
+    # as 99.4 — caught by Lance's ear), (b) evidence-by-autocorrelation alone prefers the
+    # count-every-little-pulse level (132) because busy hi-hats out-repeat the beat.
+    #
+    # What survived the bench (see prototype scratch tempo_bench4.py):
+    #   1. Work on the LOW BAND only (kick/bass < 100 Hz) — the foot-tap lives there;
+    #      full-band envelopes are dominated by subdivisions.
+    #   2. Skip the intro (30s) — grooves establish after ambient builds.
+    #   3. Dense PHASE-FOLD scan over every beat spacing 0.40–1.10s: fold the low-band
+    #      energy modulo two beats; the true beat level shows strong phase structure
+    #      (energy concentrated at kick/snare positions), subdivisions fold flat.
+    #   4. A strict kick-EVENT detector votes: the median spacing between clean, prominent
+    #      low-band hits multiplies matching candidates by 1.8 (the foot-tap vote).
+    #   5. A mild ~88 BPM log-normal prior breaks ties only.
+    onset_full = librosa.onset.onset_strength(y=y, sr=sr)
+    fps = sr / 512.0
 
-    # Data-driven global tempo first, with a WIDE prior (std_bpm well above librosa's tight
-    # default) so the 120-centered prior can't drag a genuine 75 BPM ballad toward 120.
+    # librosa's raw global estimate — kept for observability, no longer trusted to pick.
     try:
-        tempo_ac = float(np.atleast_1d(librosa.feature.tempo(onset_envelope=onset_env, sr=sr, std_bpm=24.0))[0])
+        tempo_ac = float(np.atleast_1d(librosa.feature.tempo(onset_envelope=onset_full, sr=sr, std_bpm=24.0))[0])
     except Exception:
         tempo_ac = 120.0
 
-    # Anchor the beat grid to that tempo (not the 120 default), then read the perceived
-    # pulse off the median inter-beat interval (more reliable than one autocorr peak).
-    tempo_bt, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, start_bpm=tempo_ac)
-    tempo_bt = float(np.atleast_1d(tempo_bt)[0])
-    beat_times = librosa.frames_to_time(beats, sr=sr)
-
-    if len(beat_times) >= 5:
-        ibis = np.diff(beat_times)
-        ibis = ibis[(ibis > 0.2) & (ibis < 2.0)]  # 30–300 BPM sanity window
-        bpm_grid = 60.0 / float(np.median(ibis)) if len(ibis) else tempo_bt
-        # Beat stability: tight, even spacing => trustworthy. Coefficient of variation -> 0..1.
-        cov = float(np.std(ibis) / np.mean(ibis)) if len(ibis) else 1.0
-        stability = max(0.0, 1.0 - min(cov / 0.25, 1.0))
-    else:
-        bpm_grid = tempo_bt
-        stability = 0.3
-
-    # The beat tracker reliably finds the pulse PERIOD, but often reports the wrong
-    # metrical level — half/double time, AND the sneakier 3:4 / 4:3 family (dotted-rhythm
-    # patterns: a real 74.6 BPM chill groove reads as 99.4). Caught live 2026-07-03 when
-    # Lance's ear said ~75 and the tool said 99.4 on BOTH files being compared.
-    #
-    # Resolve it by PHYSICAL EVIDENCE, not a taste prior: for each candidate count, ask how
-    # strongly the rhythm actually repeats at that beat spacing, at its 4-beat bar, and —
-    # most human of all — at the KICK/low-bass pulse (what a listener taps a foot to). The
-    # old "music sits near 108 BPM" prior is demoted to a mild tiebreaker; it must never
-    # outvote the kick drum (it was exactly what preferred the wrong 99 over the true 75).
-    base = bpm_grid
-
-    fps = sr / 512.0  # onset_strength default hop
-
-    def _acf_at(env: np.ndarray, period_s: float) -> float:
-        lag = int(round(period_s * fps))
-        if lag <= 1 or lag >= len(env) - 8:
-            return 0.0
-        e = env - env.mean()
-        denom = float(np.dot(e, e))
-        if denom <= 0:
-            return 0.0
-        return float(np.dot(e[:-lag], e[lag:]) / denom)
+    # Groove window: skip the intro, keep what remains (y is already capped upstream).
+    start = min(int(30 * sr), max(0, len(y) - int(60 * sr)))
+    y_g = y[start:]
 
     # Low-band (kick/bass) onset envelope — the felt pulse lives down here.
     try:
         from scipy.signal import butter, sosfilt
-        sos = butter(4, 150, btype="low", fs=sr, output="sos")
-        y_low = sosfilt(sos, y).astype(np.float32)
-        onset_low = librosa.onset.onset_strength(y=y_low, sr=sr)
-        del y_low
+        sos = butter(4, 100, btype="low", fs=sr, output="sos")
+        onset_low = librosa.onset.onset_strength(y=sosfilt(sos, y_g).astype(np.float32), sr=sr)
     except Exception:
-        onset_low = onset_env
+        onset_low = librosa.onset.onset_strength(y=y_g, sr=sr)
 
-    cand_set = sorted({_r(base * f, 1) for f in (0.5, 2.0 / 3.0, 0.75, 1.0, 4.0 / 3.0, 1.5, 2.0)})
-    cand_set = [c for c in cand_set if 40 <= c <= 220] or [_r(base, 1)]
-    scored: list[tuple[float, float, float]] = []  # (score, evidence, bpm)
-    for c in cand_set:
-        beat_s = 60.0 / c
-        evidence = 0.40 * _acf_at(onset_env, beat_s) + 0.25 * _acf_at(onset_env, 4 * beat_s) + 0.35 * _acf_at(onset_low, beat_s)
-        score = evidence * (0.85 + 0.30 * _perceptual_weight(c))
-        scored.append((score, evidence, c))
-    scored.sort(reverse=True)
-    primary = scored[0][2]
+    def _phase_contrast(period_s: float, bins: int = 16) -> float:
+        L = 2 * period_s  # fold two beats: captures kick/snare alternation
+        idx = np.minimum((((np.arange(len(onset_low)) / fps) % L) / L * bins).astype(int), bins - 1)
+        prof = np.array([onset_low[idx == b].mean() if (idx == b).any() else 0.0 for b in range(bins)])
+        mu = float(prof.mean())
+        return float((prof.max() - mu) / mu) if mu > 0 else 0.0
 
-    # How decisively the evidence picked one count over the next (0 = a genuine toss-up,
-    # 1 = unambiguous). Low clarity must lower the reported confidence.
-    best_s = scored[0][0]
-    runner_s = scored[1][0] if len(scored) > 1 else 0.0
-    octave_clarity = (best_s - runner_s) / best_s if best_s > 0 else 0.0
-    octaves = [c for _, _, c in scored]
+    # Strict kick events: prominent low-band peaks, half-second refractory.
+    bg = np.copy(onset_low)
+    acc = 0.0
+    for i in range(len(onset_low)):
+        acc = 0.985 * acc + 0.015 * onset_low[i]
+        bg[i] = acc
+    events: list[float] = []
+    last = -100.0
+    for i in range(1, len(onset_low) - 1):
+        t = i / fps
+        if onset_low[i] > 2.2 * max(bg[i], 1e-6) and onset_low[i] >= onset_low[i - 1] and onset_low[i] >= onset_low[i + 1] and t - last > 0.5:
+            events.append(t)
+            last = t
+    iv = np.diff(np.array(events)) if len(events) > 1 else np.array([])
+    iv = iv[(iv > 0.45) & (iv < 1.5)] if len(iv) else iv
+    kick_period = float(np.median(iv)) if len(iv) >= 15 else None
+    kick_cv = float(np.std(iv) / np.mean(iv)) if len(iv) >= 15 else 1.0
 
-    agree = abs(tempo_ac - bpm_grid) / bpm_grid < 0.06 if bpm_grid else False
-    confidence = 0.35 + 0.4 * stability + 0.25 * min(1.0, octave_clarity * 1.5)
-    confidence = min(1.0, confidence)
+    def _prior(bpm: float) -> float:
+        return math.exp(-0.5 * ((math.log(bpm) - math.log(88.0)) / 0.5) ** 2) if bpm > 0 else 0.0
 
-    # Candidate metrical levels (half / double feels) — lets the recipe say
-    # "92 BPM, with a half-time feel" instead of committing to a single number.
-    candidates = [c for c in octaves if c != primary]
+    scan: list[tuple[float, float]] = []  # (score, bpm)
+    p = 0.40
+    while p <= 1.10:
+        bpm = 60.0 / p
+        s = _phase_contrast(p) * (0.55 + 0.9 * _prior(bpm))
+        if kick_period and kick_cv < 0.4 and abs(p - kick_period) / kick_period < 0.06:
+            s *= 1.8  # the foot-tap vote
+        scan.append((s, bpm))
+        p += 0.004
+    scan.sort(reverse=True)
+    picks: list[tuple[float, float]] = []
+    for s, bpm in scan:
+        if all(abs(bpm - b) / b > 0.03 for _, b in picks):
+            picks.append((s, bpm))
+        if len(picks) == 4:
+            break
+    primary = _r(picks[0][1], 1)
+    margin = (picks[0][0] - picks[1][0]) / picks[0][0] if len(picks) > 1 and picks[0][0] > 0 else 0.0
+
+    confidence = 0.35 + 0.35 * (1.0 - min(kick_cv, 1.0)) + 0.30 * min(1.0, margin * 2.0)
+    confidence = min(0.99, confidence)
+
+    # Alternate metrical levels — lets the recipe say "~78 BPM (some count it ~97)".
+    candidates = [_r(b, 1) for _, b in picks[1:]]
 
     return {
         "bpm": primary,
         "confidence": _r(confidence, 2),
         "candidates": candidates,
-        "octave_clarity": _r(octave_clarity, 2),
-        "beat_grid_bpm": _r(bpm_grid, 1),
+        "octave_clarity": _r(margin, 2),
+        "kick_bpm": _r(60.0 / kick_period, 1) if kick_period else None,
         "autocorr_bpm": _r(tempo_ac, 1),
     }
 
