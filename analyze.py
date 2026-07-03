@@ -110,21 +110,56 @@ def _analyze_tempo(y: np.ndarray, sr: int) -> dict[str, Any]:
         stability = 0.3
 
     # The beat tracker reliably finds the pulse PERIOD, but often reports the wrong
-    # metrical level (half- or double-time) — that's the exact octave error the LLM also hits.
-    # Resolve it by scoring the half/normal/double candidates against a "preferred tempo"
-    # prior (humans hear tempo near ~108 BPM; most pop/worship sits 70–140). The candidate
-    # closest to that center wins, because its half/double almost always falls outside the range.
+    # metrical level — half/double time, AND the sneakier 3:4 / 4:3 family (dotted-rhythm
+    # patterns: a real 74.6 BPM chill groove reads as 99.4). Caught live 2026-07-03 when
+    # Lance's ear said ~75 and the tool said 99.4 on BOTH files being compared.
+    #
+    # Resolve it by PHYSICAL EVIDENCE, not a taste prior: for each candidate count, ask how
+    # strongly the rhythm actually repeats at that beat spacing, at its 4-beat bar, and —
+    # most human of all — at the KICK/low-bass pulse (what a listener taps a foot to). The
+    # old "music sits near 108 BPM" prior is demoted to a mild tiebreaker; it must never
+    # outvote the kick drum (it was exactly what preferred the wrong 99 over the true 75).
     base = bpm_grid
-    octaves = sorted({_r(base / 2, 1), _r(base, 1), _r(base * 2, 1)})
-    octaves = [c for c in octaves if 40 <= c <= 220] or [_r(base, 1)]
-    weighted = sorted(((c, _perceptual_weight(c)) for c in octaves), key=lambda x: x[1], reverse=True)
-    primary = weighted[0][0]
 
-    # How decisively the prior picked one octave over the next (0 = a genuine 75-vs-150
-    # toss-up, 1 = unambiguous). Low clarity must lower the reported confidence.
-    best_w = weighted[0][1]
-    runner_w = weighted[1][1] if len(weighted) > 1 else 0.0
-    octave_clarity = (best_w - runner_w) / best_w if best_w > 0 else 0.0
+    fps = sr / 512.0  # onset_strength default hop
+
+    def _acf_at(env: np.ndarray, period_s: float) -> float:
+        lag = int(round(period_s * fps))
+        if lag <= 1 or lag >= len(env) - 8:
+            return 0.0
+        e = env - env.mean()
+        denom = float(np.dot(e, e))
+        if denom <= 0:
+            return 0.0
+        return float(np.dot(e[:-lag], e[lag:]) / denom)
+
+    # Low-band (kick/bass) onset envelope — the felt pulse lives down here.
+    try:
+        from scipy.signal import butter, sosfilt
+        sos = butter(4, 150, btype="low", fs=sr, output="sos")
+        y_low = sosfilt(sos, y).astype(np.float32)
+        onset_low = librosa.onset.onset_strength(y=y_low, sr=sr)
+        del y_low
+    except Exception:
+        onset_low = onset_env
+
+    cand_set = sorted({_r(base * f, 1) for f in (0.5, 2.0 / 3.0, 0.75, 1.0, 4.0 / 3.0, 1.5, 2.0)})
+    cand_set = [c for c in cand_set if 40 <= c <= 220] or [_r(base, 1)]
+    scored: list[tuple[float, float, float]] = []  # (score, evidence, bpm)
+    for c in cand_set:
+        beat_s = 60.0 / c
+        evidence = 0.40 * _acf_at(onset_env, beat_s) + 0.25 * _acf_at(onset_env, 4 * beat_s) + 0.35 * _acf_at(onset_low, beat_s)
+        score = evidence * (0.85 + 0.30 * _perceptual_weight(c))
+        scored.append((score, evidence, c))
+    scored.sort(reverse=True)
+    primary = scored[0][2]
+
+    # How decisively the evidence picked one count over the next (0 = a genuine toss-up,
+    # 1 = unambiguous). Low clarity must lower the reported confidence.
+    best_s = scored[0][0]
+    runner_s = scored[1][0] if len(scored) > 1 else 0.0
+    octave_clarity = (best_s - runner_s) / best_s if best_s > 0 else 0.0
+    octaves = [c for _, _, c in scored]
 
     agree = abs(tempo_ac - bpm_grid) / bpm_grid < 0.06 if bpm_grid else False
     confidence = 0.35 + 0.4 * stability + 0.25 * min(1.0, octave_clarity * 1.5)
