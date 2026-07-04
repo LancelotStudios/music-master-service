@@ -285,9 +285,12 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
                 pass  # bad env value → just proceed without cookies
         # A rotating proxy exits from a DIFFERENT address each attempt — some are flagged, most
         # aren't — so a failed try is a lottery loss, not a verdict. Retry on fresh addresses.
+        # 6 tickets, not 3: a fresh 3-ticket batch lost ALL three once (Lance, 2026-07-04),
+        # silently degrading the whole analysis to the guess-by-ear path. Each miss is fast
+        # (socket_timeout 20s), so more tickets cost little but raise the odds sharply.
         src = None
         last_err: Exception | None = None
-        for _attempt in range(3):
+        for _attempt in range(6):
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(req.url, download=True)
