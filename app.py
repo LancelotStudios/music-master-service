@@ -251,7 +251,7 @@ def fetch_youtube(req: FetchYouTubeReq, x_master_token: str = Header(default="")
             "outtmpl": os.path.join(d, "yt.%(ext)s"),
             "noplaylist": True,
             "retries": 1,
-            "socket_timeout": 20,
+            "socket_timeout": 12,  # abandon a dead/slow proxy exit fast so the 6 retries stay time-bounded
             "verbose": True,
             "logger": _Log(),
             # Verified recipe (2026-07-02): residential proxy + the ANDROID player client — its
