@@ -86,6 +86,12 @@ class AnalyzeReq(BaseModel):
     audioUrl: str
 
 
+class PitchShiftReq(BaseModel):
+    audioUrl: str
+    semitones: float          # +N shifts up, -N shifts down; tempo is preserved
+    maxSeconds: float = 0.0    # optional trim (0 = whole file); reference shifts pass ~120
+
+
 def _download(url: str, path: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "master-service/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -356,5 +362,65 @@ def master(req: MasterReq, x_master_token: str = Header(default="")):
             raise
         except Exception as e:  # matchering or download errors
             raise HTTPException(status_code=502, detail=f"Mastering failed: {e}")
+
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+@app.post("/pitch-shift")
+def pitch_shift(req: PitchShiftReq, x_master_token: str = Header(default="")):
+    """Pitch-shift audio by N semitones with TEMPO PRESERVED (librosa phase vocoder), returning the
+    shifted MP3. Powers the "clone the sound" pipeline: shift a REFERENCE up so Suno's catalog
+    fingerprint won't recognize it (so Suno will COVER it and actually hear its DNA), then shift the
+    finished cover back DOWN to restore the original key. Same shared-secret auth as /master."""
+    if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
+        raise HTTPException(status_code=401, detail="Bad or missing token.")
+    if abs(req.semitones) < 0.01:
+        raise HTTPException(status_code=400, detail="semitones must be non-zero.")
+
+    with HEAVY_LOCK, tempfile.TemporaryDirectory() as d:
+        a_in = os.path.join(d, "audio_in")
+        a_wav = os.path.join(d, "audio.wav")
+        out_wav = os.path.join(d, "shifted.wav")
+        out_mp3 = os.path.join(d, "shifted.mp3")
+        try:
+            import numpy as np
+            import soundfile as sf
+            import librosa
+        except Exception as e:  # heavy DSP deps — same family that guards /analyze
+            raise HTTPException(status_code=503, detail=f"Pitch-shift deps unavailable: {e}")
+        try:
+            _download(req.audioUrl, a_in)
+            # Decode to 44.1k stereo WAV. Optional trim caps memory on the reference-side shift
+            # (a ~120s slice is plenty for Suno to hear the sound); the output-side correction
+            # passes no cap so the whole finished song is shifted.
+            args = [_ffmpeg(), "-y", "-loglevel", "error"]
+            if req.maxSeconds and req.maxSeconds > 0:
+                args += ["-t", str(int(req.maxSeconds))]
+            args += ["-i", a_in, "-ar", "44100", "-ac", "2", a_wav]
+            subprocess.run(args, check=True, timeout=120)
+            y, sr = sf.read(a_wav, dtype="float32")  # (samples,) mono or (samples, ch)
+            if y.ndim == 1:
+                y = y[:, None]
+            steps = float(req.semitones)
+            chans = [
+                librosa.effects.pitch_shift(np.ascontiguousarray(y[:, ch]), sr=sr, n_steps=steps)
+                for ch in range(y.shape[1])
+            ]
+            out = np.stack(chans, axis=1)
+            peak = float(np.max(np.abs(out))) if out.size else 0.0
+            if peak > 1.0:  # the shift can nudge peaks over 0 dBFS — pull back to avoid clipping
+                out = out / peak
+            sf.write(out_wav, out, sr, subtype="PCM_16")
+            _to_mp3(out_wav, out_mp3)
+            with open(out_mp3, "rb") as f:
+                audio = f.read()
+        except subprocess.CalledProcessError:
+            raise HTTPException(status_code=502, detail="Audio conversion failed.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Pitch shift failed: {e}")
+        finally:
+            _release_memory()
 
     return Response(content=audio, media_type="audio/mpeg")
