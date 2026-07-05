@@ -374,8 +374,6 @@ def pitch_shift(req: PitchShiftReq, x_master_token: str = Header(default="")):
     finished cover back DOWN to restore the original key. Same shared-secret auth as /master."""
     if MASTER_TOKEN and x_master_token != MASTER_TOKEN:
         raise HTTPException(status_code=401, detail="Bad or missing token.")
-    if abs(req.semitones) < 0.01:
-        raise HTTPException(status_code=400, detail="semitones must be non-zero.")
 
     with HEAVY_LOCK, tempfile.TemporaryDirectory() as d:
         a_in = os.path.join(d, "audio_in")
@@ -402,11 +400,16 @@ def pitch_shift(req: PitchShiftReq, x_master_token: str = Header(default="")):
             if y.ndim == 1:
                 y = y[:, None]
             steps = float(req.semitones)
-            chans = [
-                librosa.effects.pitch_shift(np.ascontiguousarray(y[:, ch]), sr=sr, n_steps=steps)
-                for ch in range(y.shape[1])
-            ]
-            out = np.stack(chans, axis=1)
+            if abs(steps) < 0.01:
+                # semitones ~0 → TRIM/re-encode only (no shift). Used to shrink a big reference
+                # under a downstream size cap (e.g. Mureka's 10MB upload limit) via maxSeconds.
+                out = y
+            else:
+                chans = [
+                    librosa.effects.pitch_shift(np.ascontiguousarray(y[:, ch]), sr=sr, n_steps=steps)
+                    for ch in range(y.shape[1])
+                ]
+                out = np.stack(chans, axis=1)
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:  # the shift can nudge peaks over 0 dBFS — pull back to avoid clipping
                 out = out / peak
